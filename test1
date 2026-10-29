@@ -1,0 +1,386 @@
+/*
+  WALL FOLLOWING + CORNER TURNING ROBOT
+
+  Hardware:
+  - Arduino UNO R4 WiFi (assumed)
+  - 2 HC-SR04 ultrasonic sensors
+  - 2 DC motors with a motor driver
+
+  Behaviour:
+  1. Follow a wall on the LEFT.
+  2. Maintain approximately 20 cm from the wall.
+  3. Detect obstacles using the FRONT sensor.
+  4. Turn RIGHT when an obstacle is detected ahead.
+  5. Resume wall following after the turn.
+*/
+
+
+// ==================================================
+// 1. ULTRASONIC SENSOR PINS
+// ==================================================
+
+// Left ultrasonic sensor
+const int LEFT_TRIG = 13;
+const int LEFT_ECHO = 12;
+
+// Front ultrasonic sensor
+const int FRONT_TRIG = 11;
+const int FRONT_ECHO = 10;
+
+
+// ==================================================
+// 2. MOTOR PINS
+// ==================================================
+
+// EXAMPLE PINS ONLY!
+// Change these to match your existing motor wiring.
+
+// Left motor
+const int LEFT_DIR = 4;
+const int LEFT_PWM = 5;
+
+// Right motor
+const int RIGHT_DIR = 7;
+const int RIGHT_PWM = 6;
+
+
+// ==================================================
+// 3. WALL-FOLLOWING SETTINGS
+// ==================================================
+
+const float SET_POINT = 20.0;  // Desired wall distance (cm)
+
+const float KP = 2.0;          // Proportional gain
+
+const int BASE_SPEED = 90;     // Normal driving speed
+const int MAX_SPEED = 150;     // Maximum PWM speed
+
+// Minimum distance allowed from the wall
+const float WALL_TOO_CLOSE = 12.0;
+
+
+// ==================================================
+// 4. CORNER-DETECTION SETTINGS
+// ==================================================
+
+// Distance at which an obstacle ahead triggers a turn
+const float FRONT_THRESHOLD = 18.0;
+
+// Duration of a right turn in milliseconds
+const unsigned long TURN_TIME = 350;
+
+// Speed during a turn
+const int TURN_SPEED = 90;
+
+// Ultrasonic timeout
+const unsigned long SENSOR_TIMEOUT = 25000;
+
+
+// ==================================================
+// 5. ROBOT STATES
+// ==================================================
+
+enum RobotState {
+  FOLLOW_WALL,
+  TURN_RIGHT
+};
+
+RobotState state = FOLLOW_WALL;
+
+unsigned long turnStartTime = 0;
+
+
+// ==================================================
+// 6. SETUP
+// ==================================================
+
+void setup() {
+
+  Serial.begin(9600);
+
+  // Ultrasonic sensors
+  pinMode(LEFT_TRIG, OUTPUT);
+  pinMode(LEFT_ECHO, INPUT);
+
+  pinMode(FRONT_TRIG, OUTPUT);
+  pinMode(FRONT_ECHO, INPUT);
+
+  // Motor driver
+  pinMode(LEFT_DIR, OUTPUT);
+  pinMode(LEFT_PWM, OUTPUT);
+
+  pinMode(RIGHT_DIR, OUTPUT);
+  pinMode(RIGHT_PWM, OUTPUT);
+
+  // Ensure the robot starts stopped
+  stopMotors();
+
+  Serial.println("Wall-following robot ready!");
+}
+
+
+// ==================================================
+// 7. MAIN LOOP
+// ==================================================
+
+void loop() {
+
+  // Read the left sensor first
+  float leftDistance = readDistance(LEFT_TRIG, LEFT_ECHO);
+
+  // Wait for echoes to settle before reading the other sensor
+  delay(30);
+
+  // Read the front sensor
+  float frontDistance = readDistance(FRONT_TRIG, FRONT_ECHO);
+
+
+  // ----------------------------------------------
+  // Print sensor readings
+  // ----------------------------------------------
+
+  Serial.print("Left: ");
+  Serial.print(leftDistance);
+
+  Serial.print(" cm | Front: ");
+  Serial.print(frontDistance);
+
+  Serial.print(" cm | State: ");
+
+  if (state == FOLLOW_WALL) {
+    Serial.println("FOLLOW_WALL");
+  } else {
+    Serial.println("TURN_RIGHT");
+  }
+
+
+  // ----------------------------------------------
+  // Handle invalid front sensor readings
+  // ----------------------------------------------
+
+  // Stop if the front sensor fails to return an echo.
+  // This avoids moving forward when the path is unknown.
+
+  if (frontDistance < 0) {
+    stopMotors();
+    Serial.println("Front sensor error - stopped");
+    delay(50);
+    return;
+  }
+
+
+  // ==================================================
+  // 8. STATE MACHINE
+  // ==================================================
+
+  switch (state) {
+
+
+    // ----------------------------------------------
+    // STATE 1: FOLLOW THE LEFT WALL
+    // ----------------------------------------------
+
+    case FOLLOW_WALL:
+
+      // Check whether an obstacle is directly ahead.
+      if (frontDistance < FRONT_THRESHOLD) {
+
+        stopMotors();
+
+        state = TURN_RIGHT;
+        turnStartTime = millis();
+
+        Serial.println("Obstacle ahead! Turning right.");
+
+        break;
+      }
+
+
+      // If the left sensor cannot detect the wall,
+      // stop rather than steering based on invalid data.
+
+      if (leftDistance < 0 || leftDistance > 300) {
+
+        stopMotors();
+
+        Serial.println("Left sensor error - stopped");
+
+        break;
+      }
+
+
+      // If the robot is dangerously close to the wall,
+      // stop before attempting to correct its position.
+
+      if (leftDistance < WALL_TOO_CLOSE) {
+
+        stopMotors();
+
+        Serial.println("Too close to left wall!");
+
+        break;
+      }
+
+
+      // Otherwise, follow the wall using the P-controller.
+      followWall(leftDistance);
+
+      break;
+
+
+
+    // ----------------------------------------------
+    // STATE 2: TURN RIGHT
+    // ----------------------------------------------
+
+    case TURN_RIGHT:
+
+      // Rotate clockwise.
+      turnRight();
+
+      // Continue turning until the timer expires.
+      if (millis() - turnStartTime >= TURN_TIME) {
+
+        stopMotors();
+
+        state = FOLLOW_WALL;
+
+        Serial.println("Turn complete. Resuming wall following.");
+
+      }
+
+      break;
+
+  }
+
+  delay(30);
+}
+
+
+// ==================================================
+// 9. WALL-FOLLOWING P-CONTROLLER
+// ==================================================
+
+void followWall(float distance) {
+
+  // Calculate the distance error.
+  float error = distance - SET_POINT;
+
+  // Calculate the proportional correction.
+  int correction = (int)(KP * error);
+
+
+  // For a wall on the LEFT:
+  //
+  // Too far from wall -> steer LEFT.
+  // Too close to wall -> steer RIGHT.
+  //
+  // Steering is achieved by adjusting wheel speeds.
+
+  int leftSpeed = BASE_SPEED - correction;
+  int rightSpeed = BASE_SPEED + correction;
+
+
+  // Keep motor speeds within the allowed range.
+  leftSpeed = constrain(leftSpeed, 0, MAX_SPEED);
+  rightSpeed = constrain(rightSpeed, 0, MAX_SPEED);
+
+
+  // Apply the motor speeds.
+  setMotorSpeeds(leftSpeed, rightSpeed);
+
+
+  // Print controller information.
+  Serial.print("Error: ");
+  Serial.print(error);
+
+  Serial.print(" | Correction: ");
+  Serial.print(correction);
+
+  Serial.print(" | Left motor: ");
+  Serial.print(leftSpeed);
+
+  Serial.print(" | Right motor: ");
+  Serial.println(rightSpeed);
+}
+
+
+// ==================================================
+// 10. ULTRASONIC DISTANCE FUNCTION
+// ==================================================
+
+float readDistance(int trigPin, int echoPin) {
+
+  // Ensure the trigger is LOW before sending a pulse.
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+
+  // Send a 10-microsecond trigger pulse.
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+
+  // Measure the echo duration.
+  unsigned long duration =
+      pulseIn(echoPin, HIGH, SENSOR_TIMEOUT);
+
+
+  // If no echo arrives, return an error value.
+  if (duration == 0) {
+    return -1;
+  }
+
+
+  // Convert travel time into distance in centimetres.
+  // Divide by 2 because sound travels to the object
+  // and then returns to the sensor.
+
+  float distance = duration * 0.0343 / 2.0;
+
+  return distance;
+}
+
+
+// ==================================================
+// 11. MOTOR SPEED CONTROL
+// ==================================================
+
+void setMotorSpeeds(int leftSpeed, int rightSpeed) {
+
+  // Assumes HIGH makes both motors move forward.
+  // Reverse these direction settings if necessary.
+
+  digitalWrite(LEFT_DIR, HIGH);
+  analogWrite(LEFT_PWM, leftSpeed);
+
+  digitalWrite(RIGHT_DIR, HIGH);
+  analogWrite(RIGHT_PWM, rightSpeed);
+}
+
+
+// ==================================================
+// 12. RIGHT TURN
+// ==================================================
+
+void turnRight() {
+
+  // Left wheel moves forward.
+  digitalWrite(LEFT_DIR, HIGH);
+  analogWrite(LEFT_PWM, TURN_SPEED);
+
+  // Right wheel moves backward.
+  digitalWrite(RIGHT_DIR, LOW);
+  analogWrite(RIGHT_PWM, TURN_SPEED);
+}
+
+
+// ==================================================
+// 13. STOP MOTORS
+// ==================================================
+
+void stopMotors() {
+
+  analogWrite(LEFT_PWM, 0);
+  analogWrite(RIGHT_PWM, 0);
+}
