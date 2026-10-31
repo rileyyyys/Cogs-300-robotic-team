@@ -1,0 +1,162 @@
+// Lab05 Wall Follow — LEFT ultrasonic only
+// Keeps the robot WALL_SET_POINT_CM from a wall on its LEFT.
+
+// ---------- Pins ----------
+// Motors: same as Lab 03. enA = left motor, enB = right motor.
+int enA = 9;   // PWM
+int in1 = 8;
+int in2 = 7;
+int in3 = 5;
+int in4 = 4;
+int enB = 3;   // PWM
+
+// Left ultrasonic. CHANGE THESE to the pins your left sensor is wired to.
+const int LEFT_TRIG = 12;
+const int LEFT_ECHO = 13;
+
+// ---------- Settings ----------
+const float WALL_SET_POINT_CM = 20.0;     // distance to keep from the wall
+const float WALL_KP = 4.0;                // steering strength per cm of error
+const float WALL_MAX_ERROR_CM = 10.0;     // clamp so one bad reading can't spin the robot
+const int BASE_PWM = 150;                 // forward speed
+const int MAX_PWM = 200;
+
+const float WALL_LOST_CM = 60.0;          // outside corner: wall gone
+const unsigned long PASS_CORNER_MS = 400; // drive past the corner so the back wheels clear it
+const unsigned long MAX_TURN_MS = 3000;   // give up searching after this long
+const int TURN_OUTER_PWM = 170;           // right wheel while turning left around a corner
+const int TURN_INNER_PWM = 60;            // left wheel while turning (0 = sharp, higher = wider)
+
+enum WallState { FOLLOW, PASS_CORNER, OUTSIDE_TURN, LOST };
+WallState state = FOLLOW;
+unsigned long stateStart = 0;
+
+// ---------- Motors ----------
+// Speeds run from -255 (full reverse) to 255 (full forward).
+void setLeft(int speed) {
+    speed = constrain(speed, -255, 255);
+    digitalWrite(in1, speed < 0 ? HIGH : LOW);
+    digitalWrite(in2, speed < 0 ? LOW : HIGH);
+    analogWrite(enA, abs(speed));
+}
+
+void setRight(int speed) {
+    speed = constrain(speed, -255, 255);
+    digitalWrite(in3, speed < 0 ? LOW : HIGH);
+    digitalWrite(in4, speed < 0 ? HIGH : LOW);
+    analogWrite(enB, abs(speed));
+}
+
+void setMotors(int left, int right) {
+    setLeft(left);
+    setRight(right);
+}
+
+// ---------- Ultrasonic ----------
+// A missing echo is reported as MAX_RANGE_CM ("nothing in range").
+const unsigned long ECHO_TIMEOUT_US = 25000UL;
+const float MAX_RANGE_CM = 400.0;
+
+float readDistanceCm(int trigPin, int echoPin) {
+    digitalWrite(trigPin, LOW);
+    delayMicroseconds(2);
+    digitalWrite(trigPin, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(trigPin, LOW);
+
+    unsigned long duration = pulseIn(echoPin, HIGH, ECHO_TIMEOUT_US);
+    if (duration == 0) return MAX_RANGE_CM;
+    return duration * 0.0343 / 2.0;
+}
+
+// Median of 3 pings: throws away single bad readings.
+float readMedianCm(int trigPin, int echoPin) {
+    float a = readDistanceCm(trigPin, echoPin);
+    delay(10);
+    float b = readDistanceCm(trigPin, echoPin);
+    delay(10);
+    float c = readDistanceCm(trigPin, echoPin);
+    return max(min(a, b), min(max(a, b), c));
+}
+
+void enterState(WallState next) {
+    state = next;
+    stateStart = millis();
+}
+
+// ---------- Main ----------
+void setup() {
+    pinMode(enA, OUTPUT);
+    pinMode(in1, OUTPUT);
+    pinMode(in2, OUTPUT);
+    pinMode(in3, OUTPUT);
+    pinMode(in4, OUTPUT);
+    pinMode(enB, OUTPUT);
+
+    pinMode(LEFT_TRIG, OUTPUT);
+    pinMode(LEFT_ECHO, INPUT);
+
+    Serial.begin(9600);
+    setMotors(0, 0);
+    delay(2000);  // time to put the robot down
+}
+
+void loop() {
+    float wall = readMedianCm(LEFT_TRIG, LEFT_ECHO);
+    int left = 0;
+    int right = 0;
+
+    switch (state) {
+        case FOLLOW: {
+            if (wall > WALL_LOST_CM) {
+                enterState(PASS_CORNER);
+                break;
+            }
+            // Positive error = too far from the wall = steer left (slow the left wheel).
+            float error = constrain(wall - WALL_SET_POINT_CM, -WALL_MAX_ERROR_CM, WALL_MAX_ERROR_CM);
+            int correction = WALL_KP * error;
+            left = constrain(BASE_PWM - correction, 0, MAX_PWM);
+            right = constrain(BASE_PWM + correction, 0, MAX_PWM);
+            break;
+        }
+
+        case PASS_CORNER:
+            if (wall < WALL_LOST_CM) {  // just a gap or a bad reading
+                enterState(FOLLOW);
+                break;
+            }
+            if (millis() - stateStart > PASS_CORNER_MS) {
+                enterState(OUTSIDE_TURN);
+                break;
+            }
+            left = BASE_PWM;
+            right = BASE_PWM;
+            break;
+
+        case OUTSIDE_TURN:
+            if (wall < WALL_LOST_CM) {
+                enterState(FOLLOW);
+                break;
+            }
+            if (millis() - stateStart > MAX_TURN_MS) {
+                enterState(LOST);
+                break;
+            }
+            // Arc left around the corner.
+            left = TURN_INNER_PWM;
+            right = TURN_OUTER_PWM;
+            break;
+
+        case LOST:
+            // Stopped: no wall found. Press reset to try again.
+            Serial.println("WALL LOST - press reset");
+            break;
+    }
+    setMotors(left, right);
+
+    // Serial Plotter output. state: 0=FOLLOW 1=PASS_CORNER 2=OUTSIDE_TURN 3=LOST
+    Serial.print("state:"); Serial.print(state);
+    Serial.print("\twall:"); Serial.print(wall);
+    Serial.print("\tleft:"); Serial.print(left);
+    Serial.print("\tright:"); Serial.println(right);
+}
