@@ -1,0 +1,267 @@
+// ==========================================
+// ULTRASONIC SENSORS
+// ==========================================
+
+const int LEFT_TRIG = 13;
+const int LEFT_ECHO = 12;
+
+const int FRONT_TRIG = 11;
+const int FRONT_ECHO = 10;
+
+
+// ==========================================
+// MOTOR DRIVER (L298N)
+// ==========================================
+
+const int ENA = 9;
+const int IN1 = 8;
+const int IN2 = 7;
+
+const int IN3 = 5;
+const int IN4 = 4;
+const int ENB = 3;
+
+
+// ==========================================
+// SETTINGS
+// ==========================================
+
+const float TARGET_DISTANCE = 20.0;
+const float FRONT_THRESHOLD = 50.0;
+
+const float MAX_WALL_DISTANCE = 40.0;
+
+const int BASE_SPEED = 120;
+const int MAX_SPEED = 200;
+
+const float Kp = 3.0;
+
+const int TURN_SPEED = 130;
+const int TURN_TIME = 500;
+
+
+// ==========================================
+// DISTANCE MEASUREMENT
+// ==========================================
+
+float getDistance(int trigPin, int echoPin) {
+
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(trigPin, LOW);
+
+  long duration = pulseIn(echoPin, HIGH, 25000);
+
+  if (duration == 0) {
+    return -1;
+  }
+
+  return duration * 0.0343 / 2;
+}
+
+
+// ==========================================
+// MOTOR CONTROL
+// ==========================================
+
+void moveForward(int leftSpeed, int rightSpeed) {
+
+  leftSpeed = constrain(leftSpeed, 0, MAX_SPEED);
+  rightSpeed = constrain(rightSpeed, 0, MAX_SPEED);
+
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+
+  analogWrite(ENA, leftSpeed);
+  analogWrite(ENB, rightSpeed);
+}
+
+
+void stopMotors() {
+
+  analogWrite(ENA, 0);
+  analogWrite(ENB, 0);
+}
+
+
+void turnRight() {
+
+  // Left motor forward
+  // Right motor backward
+
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+
+  analogWrite(ENA, TURN_SPEED);
+  analogWrite(ENB, TURN_SPEED);
+
+  delay(TURN_TIME);
+
+  stopMotors();
+}
+
+
+void turnLeft() {
+
+  // Left motor backward
+  // Right motor forward
+
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+
+  analogWrite(ENA, TURN_SPEED);
+  analogWrite(ENB, TURN_SPEED);
+
+  delay(TURN_TIME);
+
+  stopMotors();
+}
+
+
+// ==========================================
+// P-CONTROLLER WALL FOLLOWING
+// ==========================================
+
+void followWall(float leftDistance) {
+
+  float error = leftDistance - TARGET_DISTANCE;
+
+  float correction = Kp * error;
+
+  int leftSpeed = BASE_SPEED + correction;
+  int rightSpeed = BASE_SPEED - correction;
+
+  leftSpeed = constrain(leftSpeed, 0, MAX_SPEED);
+  rightSpeed = constrain(rightSpeed, 0, MAX_SPEED);
+
+  moveForward(leftSpeed, rightSpeed);
+}
+
+
+// ==========================================
+// SETUP
+// ==========================================
+
+void setup() {
+
+  Serial.begin(9600);
+
+  pinMode(LEFT_TRIG, OUTPUT);
+  pinMode(LEFT_ECHO, INPUT);
+
+  pinMode(FRONT_TRIG, OUTPUT);
+  pinMode(FRONT_ECHO, INPUT);
+
+  pinMode(ENA, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  pinMode(ENB, OUTPUT);
+
+  stopMotors();
+
+  Serial.println("Robot ready!");
+}
+
+
+// ==========================================
+// MAIN LOOP
+// ==========================================
+
+void loop() {
+
+  float leftDistance = getDistance(LEFT_TRIG, LEFT_ECHO);
+
+  delay(30);
+
+  float frontDistance = getDistance(FRONT_TRIG, FRONT_ECHO);
+
+
+  Serial.print("Left: ");
+  Serial.print(leftDistance);
+
+  Serial.print(" cm | Front: ");
+  Serial.print(frontDistance);
+
+  Serial.println(" cm");
+
+
+  // ========================================
+  // 1. CHECK FOR FRONT OBSTACLE
+  // ========================================
+
+  if (frontDistance > 0 &&
+      frontDistance <= FRONT_THRESHOLD) {
+
+    stopMotors();
+
+    delay(200);
+
+    // Check whether left wall still exists
+
+    leftDistance = getDistance(LEFT_TRIG, LEFT_ECHO);
+
+    if (leftDistance > 0 &&
+        leftDistance <= MAX_WALL_DISTANCE) {
+
+      Serial.println("Sharp corner: TURN RIGHT");
+
+      turnRight();
+
+    }
+
+    else {
+
+      Serial.println("No left wall: TURN LEFT");
+
+      turnLeft();
+
+    }
+
+    delay(200);
+
+  }
+
+
+  // ========================================
+  // 2. FOLLOW STRAIGHT OR CURVED WALL
+  // ========================================
+
+  else if (leftDistance > 0 &&
+           leftDistance <= MAX_WALL_DISTANCE) {
+
+    Serial.println("Following wall");
+
+    followWall(leftDistance);
+
+  }
+
+
+  // ========================================
+  // 3. TEMPORARILY LOST LEFT WALL
+  // ========================================
+
+  else {
+
+    Serial.println("Searching for wall");
+
+    moveForward(BASE_SPEED, BASE_SPEED);
+
+  }
+
+}
