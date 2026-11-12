@@ -18,4 +18,4 @@ Set `MODE` at the top of the sketch:
 3. `MODE_PING_PONG` – lab step 3, bang-bang follower ping-ponging along the tape edges.
 4. `MODE_BAYES` – lab step 4, Bayes filter over the line's position + P-control; remembers which side the line left from so it can recover on sharp corners.
 
-Before running, measure and set `SENSOR_SPACING_CM` (centre → side sensor) and `TAPE_WIDTH_CM`.
+Mount the centre sensor over the tape and the left/right sensors just outside its edges. Measure and set `SENSOR_SPACING_CM` (centre → side sensor, ~3–3.5 cm for 4.8 cm tape) and `TAPE_WIDTH_CM`.
