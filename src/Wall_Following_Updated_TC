@@ -1,0 +1,324 @@
+// ---------------- MOTOR PINS (unchanged) ----------------
+int enA = 9;   // right motor PWM
+int in1 = 8;
+int in2 = 7;
+
+int in3 = 5;   // left motor
+int in4 = 4;
+int enB = 3;   // left motor PWM
+
+int normalSpeed = 250;
+int gentleSpeed = 180;
+
+// ---------------- ULTRASONIC PINS ----------------
+const int LEFT_TRIG  = 13;
+const int LEFT_ECHO  = 12;
+const int FRONT_TRIG = 11;
+const int FRONT_ECHO = 10;
+
+// ---------------- WALL FOLLOWING SETTINGS (TUNE THESE) ----------------
+const int   baseSpeed       = 200;   // cruising speed while following the wall (0-255)
+const float TARGET_LEFT_CM  = 10.0;  // distance to hold from the left wall
+const float LEFT_OPEN_CM    = 30.0;  // left reading above this = opening / wall lost
+const float FRONT_STOP_CM   = 14.0;  // front reading below this = wall ahead
+const float Kp              = 8.0;   // steering strength (PWM units per cm of error)
+const int   maxCorrection   = 55;    // limit on steering so speeds stay in 0-255
+
+const int TURN_90_MS        = 380;   // time to spin ~90 degrees  (CALIBRATE!)
+const int CORNER_CLEAR_MS   = 350;   // drive forward past a left opening before turning (CALIBRATE!)
+const int REACQUIRE_MS      = 600;   // drive forward after turning to find the wall again
+
+bool autoMode = false;
+bool wallAcquired = false;
+
+void setup() {
+  pinMode(enA, OUTPUT);
+  pinMode(in1, OUTPUT);
+  pinMode(in2, OUTPUT);
+
+  pinMode(in3, OUTPUT);
+  pinMode(in4, OUTPUT);
+  pinMode(enB, OUTPUT);
+
+  pinMode(LEFT_TRIG, OUTPUT);
+  pinMode(LEFT_ECHO, INPUT);
+  pinMode(FRONT_TRIG, OUTPUT);
+  pinMode(FRONT_ECHO, INPUT);
+
+  Serial.begin(9600);
+
+  Serial.println("Robot Controls:");
+  Serial.println("f = straight");
+  Serial.println("q = gentle left");
+  Serial.println("l = sharp left");
+  Serial.println("e = gentle right");
+  Serial.println("r = sharp right");
+  Serial.println("b = backwards");
+  Serial.println("s = stop (also exits auto mode)");
+  Serial.println("w = AUTO left-wall-following mode");
+}
+
+void loop() {
+  // ---- manual commands (any key press cancels auto mode, except 'w') ----
+  if (Serial.available() > 0) {
+    char command = Serial.read();
+
+    if (command == 'w') {
+      autoMode = true;
+      wallAcquired = false;
+      Serial.println("AUTO: left wall following ON");
+    }
+    else if (command == 'f' || command == 'q' || command == 'l' || command == 'e' ||
+             command == 'r' || command == 'b' || command == 's') {
+      autoMode = false;   // manual override
+
+      if (command == 'f') { straight();     Serial.println("Straight"); }
+      else if (command == 'q') { gentleLeft();   Serial.println("Gentle Left"); }
+      else if (command == 'l') { sharpLeft();    Serial.println("Sharp Left"); }
+      else if (command == 'e') { gentleRight();  Serial.println("Gentle Right"); }
+      else if (command == 'r') { sharpRight();   Serial.println("Sharp Right"); }
+      else if (command == 'b') { backwards();    Serial.println("Backwards"); }
+      else if (command == 's') { stopRobot();    Serial.println("Stop"); }
+    }
+  }
+
+  // ---- autonomous mode ----
+  if (autoMode) {
+    wallFollow();
+  }
+}
+
+
+// =====================================================================
+//                       ULTRASONIC SENSING
+// =====================================================================
+
+// One raw reading in cm. Returns 400 if no echo (nothing in range).
+float readOnce(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  long duration = pulseIn(echoPin, HIGH, 20000);  // 20 ms timeout (~3.4 m)
+  if (duration == 0) return 400.0;
+  return duration * 0.0343 / 2.0;
+}
+
+// Median of 3 readings to reject random spikes.
+float readDistanceCm(int trigPin, int echoPin) {
+  float a = readOnce(trigPin, echoPin); delay(5);
+  float b = readOnce(trigPin, echoPin); delay(5);
+  float c = readOnce(trigPin, echoPin);
+
+  if ((a >= b && a <= c) || (a <= b && a >= c)) return a;
+  if ((b >= a && b <= c) || (b <= a && b >= c)) return b;
+  return c;
+}
+
+
+// =====================================================================
+//                    LEFT-HAND WALL FOLLOWING LOGIC
+// =====================================================================
+// Priority order (classic "left-hand rule"):
+//   1. Wall ahead      -> turn (left if open, otherwise right; repeats = U-turn)
+//   2. Left wall lost  -> drive past the corner, turn left, find wall again
+//   3. Otherwise       -> steer proportionally to hold TARGET_LEFT_CM
+void wallFollow() {
+  float front = readDistanceCm(FRONT_TRIG, FRONT_ECHO);
+  delay(10);  // avoid the two sensors hearing each other's pulses
+  float left  = readDistanceCm(LEFT_TRIG, LEFT_ECHO);
+
+  Serial.print("F: "); Serial.print(front);
+  Serial.print("  L: "); Serial.println(left);
+
+  if (left < LEFT_OPEN_CM) wallAcquired = true;
+
+  // ---- 1. WALL AHEAD ----
+  if (front < FRONT_STOP_CM) {
+    stopRobot();
+    delay(100);
+
+    if (front < 6.0) {            // too close to turn safely - back off a bit
+      backwards();
+      delay(200);
+      stopRobot();
+    }
+
+    if (left > LEFT_OPEN_CM) {
+      spinLeft(TURN_90_MS);       // opening on the left -> take it
+    } else {
+      spinRight(TURN_90_MS);      // wall left + wall front -> turn right
+                                  // (if right is also blocked, next loop turns again = U-turn)
+    }
+    stopRobot();
+    delay(100);
+    return;
+  }
+
+  // ---- 2. LEFT WALL DISAPPEARED (opening / corner) ----
+  if (left > LEFT_OPEN_CM) {
+    if (!wallAcquired) {
+      // Haven't found a wall yet (e.g. at start): just drive straight until we do
+      driveForward(baseSpeed, baseSpeed);
+      return;
+    }
+
+    // Sensor is on the side, so keep going until the robot's body clears the corner
+    driveForwardChecked(CORNER_CLEAR_MS);
+    stopRobot();
+    delay(100);
+
+    spinLeft(TURN_90_MS);
+    stopRobot();
+    delay(100);
+
+    // Drive forward until the wall is found again (or something blocks us)
+    driveForwardChecked(REACQUIRE_MS);
+    return;
+  }
+
+  // ---- 3. NORMAL WALL FOLLOWING (proportional steering) ----
+  float error = left - TARGET_LEFT_CM;          // + = too far from wall, - = too close
+  int correction = (int)(Kp * error);
+  correction = constrain(correction, -maxCorrection, maxCorrection);
+
+  // Too far  -> left wheel slower / right wheel faster -> veer left (toward wall)
+  // Too close-> left wheel faster / right wheel slower -> veer right (away from wall)
+  int leftSpeed  = constrain(baseSpeed - correction, 0, 255);
+  int rightSpeed = constrain(baseSpeed + correction, 0, 255);
+
+  driveForward(rightSpeed, leftSpeed);
+}
+
+
+// =====================================================================
+//                         MOTOR HELPERS
+// =====================================================================
+
+// Forward with independent speeds (right motor = enA, left motor = enB)
+void driveForward(int rightSpeed, int leftSpeed) {
+  digitalWrite(in1, HIGH);
+  digitalWrite(in2, LOW);
+  analogWrite(enA, rightSpeed);
+
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, HIGH);
+  analogWrite(enB, leftSpeed);
+}
+
+// Drive forward for up to 'ms', aborting early if a wall appears in front
+void driveForwardChecked(int ms) {
+  unsigned long start = millis();
+  driveForward(baseSpeed, baseSpeed);
+  while (millis() - start < (unsigned long)ms) {
+    if (readOnce(FRONT_TRIG, FRONT_ECHO) < FRONT_STOP_CM) break;
+    delay(20);
+  }
+}
+
+// Spin in place to the left: right wheel forward, left wheel backward
+void spinLeft(int ms) {
+  digitalWrite(in1, HIGH);
+  digitalWrite(in2, LOW);
+  analogWrite(enA, normalSpeed);
+
+  digitalWrite(in3, HIGH);
+  digitalWrite(in4, LOW);
+  analogWrite(enB, normalSpeed);
+  delay(ms);
+}
+
+// Spin in place to the right: left wheel forward, right wheel backward
+void spinRight(int ms) {
+  digitalWrite(in1, LOW);
+  digitalWrite(in2, HIGH);
+  analogWrite(enA, normalSpeed);
+
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, HIGH);
+  analogWrite(enB, normalSpeed);
+  delay(ms);
+}
+
+
+// =====================================================================
+//                  YOUR ORIGINAL MOTOR FUNCTIONS
+// =====================================================================
+
+// STRAIGHT
+void straight() {
+  digitalWrite(in1, HIGH);
+  digitalWrite(in2, LOW);
+  analogWrite(enA, normalSpeed);
+
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, HIGH);
+  analogWrite(enB, normalSpeed);
+}
+
+// GENTLE LEFT
+void gentleLeft() {
+  // Right motor normal speed
+  digitalWrite(in1, HIGH);
+  digitalWrite(in2, LOW);
+  analogWrite(enA, normalSpeed);
+
+  // Left motor slower
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, HIGH);
+  analogWrite(enB, gentleSpeed);
+}
+
+// SHARP LEFT
+void sharpLeft() {
+  // Right motor moves forward
+  digitalWrite(in1, HIGH);
+  digitalWrite(in2, LOW);
+  analogWrite(enA, normalSpeed);
+
+  // Left motor stopped
+  analogWrite(enB, 0);
+}
+
+// GENTLE RIGHT
+void gentleRight() {
+  // Right motor slower
+  digitalWrite(in1, HIGH);
+  digitalWrite(in2, LOW);
+  analogWrite(enA, gentleSpeed);
+
+  // Left motor normal speed
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, HIGH);
+  analogWrite(enB, normalSpeed);
+}
+
+// SHARP RIGHT
+void sharpRight() {
+  // Right motor stopped
+  analogWrite(enA, 0);
+
+  // Left motor moves forward
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, HIGH);
+  analogWrite(enB, normalSpeed);
+}
+
+// BACKWARDS
+void backwards() {
+  digitalWrite(in1, LOW);
+  digitalWrite(in2, HIGH);
+  analogWrite(enA, normalSpeed);
+
+  digitalWrite(in3, HIGH);
+  digitalWrite(in4, LOW);
+  analogWrite(enB, normalSpeed);
+}
+
+// STOP
+void stopRobot() {
+  analogWrite(enA, 0);
+  analogWrite(enB, 0);
+}
