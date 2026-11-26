@@ -1,0 +1,538 @@
+// ==========================================
+// PD WALL FOLLOWING + LEFT AND RIGHT TURNING
+// Arduino UNO R4 WiFi + L298N
+// ==========================================
+
+
+// ---------- MOTOR PINS ----------
+
+// Right motor
+const int ENA = 9;
+const int IN1 = 8;
+const int IN2 = 7;
+
+// Left motor
+const int ENB = 3;
+const int IN3 = 5;
+const int IN4 = 4;
+
+
+// ---------- ULTRASONIC SENSOR PINS ----------
+
+// Left sensor
+const int LEFT_TRIG = 13;
+const int LEFT_ECHO = 12;
+
+// Front sensor
+const int FRONT_TRIG = 11;
+const int FRONT_ECHO = 10;
+
+
+// ---------- WALL FOLLOWING SETTINGS ----------
+
+const float TARGET_DISTANCE = 10.0;
+
+const int BASE_SPEED = 70;
+const int MAX_CORRECTION = 20;
+const int MAX_SPEED = 130;
+
+const int LEFT_MOTOR_BOOST = 17;
+
+
+// PD controller gains
+const float KP = 1.5;
+const float KD = 3.0;
+
+
+// ---------- RIGHT TURN SETTINGS ----------
+
+const float TURN_THRESHOLD = 15.0;
+
+const int TURN_SPEED = 75;
+const int TURN_PAUSE = 300;
+
+const int EXTRA_TURN_TIME = 350;
+
+
+// ---------- LEFT TURN SETTINGS ----------
+
+// Distance at which an opening is detected
+const float LEFT_TURN_THRESHOLD = 20.0;
+
+// Number of consecutive readings needed
+const int LEFT_TURN_CONFIRMATIONS = 3;
+
+// Duration of left pivot
+const int LEFT_TURN_DURATION = 450;
+
+
+// ---------- MOVEMENT TIMING ----------
+
+const int MOVE_TIME = 550;
+const int MEASURE_DELAY = 30;
+
+
+// ---------- VARIABLES ----------
+
+float previousDistance = TARGET_DISTANCE;
+float currentDistance = TARGET_DISTANCE;
+
+bool firstReading = true;
+
+// Left turn detection
+int leftOpeningCount = 0;
+
+bool leftTurnArmed = true;
+
+
+// ==========================================
+// SETUP
+// ==========================================
+
+void setup() {
+
+  Serial.begin(9600);
+
+  pinMode(ENA, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+
+  pinMode(ENB, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  pinMode(LEFT_TRIG, OUTPUT);
+  pinMode(LEFT_ECHO, INPUT);
+
+  pinMode(FRONT_TRIG, OUTPUT);
+  pinMode(FRONT_ECHO, INPUT);
+
+  stopMotors();
+
+  delay(1000);
+
+  Serial.println("Wall Following Started");
+
+}
+
+
+// ==========================================
+// MAIN LOOP
+// ==========================================
+
+void loop() {
+
+  // ========================================
+  // STOP AND MEASURE
+  // ========================================
+
+  stopMotors();
+
+  delay(MEASURE_DELAY);
+
+
+  // Read left sensor
+  float leftDistance = readDistance(
+    LEFT_TRIG,
+    LEFT_ECHO
+  );
+
+  delay(30);
+
+
+  // Read front sensor
+  float frontDistance = readDistance(
+    FRONT_TRIG,
+    FRONT_ECHO
+  );
+
+
+  // ========================================
+  // LEFT TURN DETECTION
+  // ========================================
+
+  if (leftDistance > LEFT_TURN_THRESHOLD) {
+
+    leftOpeningCount++;
+
+    Serial.print("Possible left opening: ");
+    Serial.println(leftOpeningCount);
+
+  } else {
+
+    leftOpeningCount = 0;
+
+    // Re-arm left turning once a wall is detected
+    if (leftDistance > 0) {
+      leftTurnArmed = true;
+    }
+
+  }
+
+
+  // ========================================
+  // PERFORM LEFT TURN
+  // ========================================
+
+  if (leftTurnArmed &&
+      leftOpeningCount >= LEFT_TURN_CONFIRMATIONS) {
+
+    Serial.println("Left opening confirmed!");
+
+    turnLeft();
+
+    // Prevent immediate repeated left turns
+    leftTurnArmed = false;
+    leftOpeningCount = 0;
+
+    // Reset PD controller
+    firstReading = true;
+
+    return;
+  }
+
+
+  // ========================================
+  // FRONT OBSTACLE DETECTION
+  // ========================================
+
+  if (frontDistance > 0 &&
+      frontDistance <= TURN_THRESHOLD) {
+
+    Serial.println("Obstacle detected! Turning right.");
+
+    turnRight();
+
+    // Reset PD controller
+    firstReading = true;
+
+    return;
+  }
+
+
+  // ========================================
+  // CHECK LEFT SENSOR
+  // ========================================
+
+  if (leftDistance <= 0) {
+
+    stopMotors();
+
+    Serial.println("Invalid left reading!");
+
+    delay(100);
+
+    return;
+  }
+
+
+  // ========================================
+  // CALCULATE PD CONTROL
+  // ========================================
+
+  currentDistance = leftDistance;
+
+
+  // Proportional error
+  float error =
+    currentDistance - TARGET_DISTANCE;
+
+
+  // Derivative: change in distance
+  float distanceChange = 0;
+
+  if (!firstReading) {
+
+    distanceChange =
+      currentDistance - previousDistance;
+
+  }
+
+
+  // Calculate PD correction
+  float correction =
+    (KP * error) +
+    (KD * distanceChange);
+
+
+  // Limit correction
+  correction = constrain(
+    correction,
+    -MAX_CORRECTION,
+    MAX_CORRECTION
+  );
+
+
+  // Store current reading
+  previousDistance = currentDistance;
+
+  firstReading = false;
+
+
+  // ========================================
+  // CALCULATE MOTOR SPEEDS
+  // ========================================
+
+  int leftSpeed =
+    BASE_SPEED - correction;
+
+  int rightSpeed =
+    BASE_SPEED + correction;
+
+
+  // Apply left motor compensation
+  leftSpeed += LEFT_MOTOR_BOOST;
+
+
+  // Constrain speeds
+  leftSpeed = constrain(
+    leftSpeed,
+    0,
+    MAX_SPEED
+  );
+
+  rightSpeed = constrain(
+    rightSpeed,
+    0,
+    MAX_SPEED
+  );
+
+
+  // ========================================
+  // MOVE ROBOT
+  // ========================================
+
+  setMotors(
+    leftSpeed,
+    rightSpeed
+  );
+
+  delay(MOVE_TIME);
+
+  stopMotors();
+
+
+  // ========================================
+  // DEBUGGING OUTPUT
+  // ========================================
+
+  Serial.print("Left distance: ");
+  Serial.print(currentDistance);
+
+  Serial.print(" cm | Front distance: ");
+  Serial.print(frontDistance);
+
+  Serial.print(" cm | Error: ");
+  Serial.print(error);
+
+  Serial.print(" | Correction: ");
+  Serial.println(correction);
+
+}
+
+
+// ==========================================
+// LEFT TURN FUNCTION
+// ==========================================
+
+void turnLeft() {
+
+  Serial.println("Turning left...");
+
+  // Stop before turning
+  stopMotors();
+
+  delay(TURN_PAUSE);
+
+
+  // Pivot left:
+  // Left motor backward
+  // Right motor forward
+
+  setMotors(
+    -(TURN_SPEED + LEFT_MOTOR_BOOST),
+    TURN_SPEED
+  );
+
+
+  // Continue turning for set duration
+  delay(LEFT_TURN_DURATION);
+
+
+  // Stop after completing turn
+  stopMotors();
+
+  delay(TURN_PAUSE);
+
+
+  Serial.println("Left turn complete!");
+
+}
+
+
+// ==========================================
+// RIGHT TURN FUNCTION
+// ==========================================
+
+void turnRight() {
+
+  Serial.println("Turning right...");
+
+  // Stop before turning
+  stopMotors();
+
+  delay(TURN_PAUSE);
+
+
+  // Begin right pivot
+  setMotors(
+    TURN_SPEED + LEFT_MOTOR_BOOST,
+    -TURN_SPEED
+  );
+
+
+  // Keep turning while obstacle is detected
+
+  while (true) {
+
+    delay(50);
+
+    float frontDistance = readDistance(
+      FRONT_TRIG,
+      FRONT_ECHO
+    );
+
+
+    // If path is clear, finish turning
+    if (frontDistance > TURN_THRESHOLD) {
+
+      Serial.println("Path clear! Continuing turn...");
+
+      break;
+    }
+
+
+    // If reading is invalid, stop and retry
+    if (frontDistance <= 0) {
+
+      stopMotors();
+
+      delay(100);
+
+      setMotors(
+        TURN_SPEED + LEFT_MOTOR_BOOST,
+        -TURN_SPEED
+      );
+
+    }
+
+  }
+
+
+  // Continue turning slightly longer
+  delay(EXTRA_TURN_TIME);
+
+
+  // Stop after completing turn
+  stopMotors();
+
+  delay(TURN_PAUSE);
+
+
+  Serial.println("Right turn complete!");
+
+}
+
+
+// ==========================================
+// ULTRASONIC DISTANCE FUNCTION
+// ==========================================
+
+float readDistance(int trigPin, int echoPin) {
+
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(trigPin, LOW);
+
+  long duration = pulseIn(
+    echoPin,
+    HIGH,
+    12000
+  );
+
+  if (duration == 0) {
+    return -1;
+  }
+
+  float distance =
+    duration * 0.0343 / 2.0;
+
+  return distance;
+
+}
+
+
+// ==========================================
+// MOTOR CONTROL FUNCTION
+// ==========================================
+
+void setMotors(int leftSpeed, int rightSpeed) {
+
+  // LEFT MOTOR
+
+  bool leftForward = (leftSpeed >= 0);
+
+  // Reverse left motor direction
+  leftForward = !leftForward;
+
+  if (leftForward) {
+
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+
+  } else {
+
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, HIGH);
+
+  }
+
+
+  // RIGHT MOTOR
+
+  bool rightForward = (rightSpeed >= 0);
+
+  if (rightForward) {
+
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+
+  } else {
+
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, HIGH);
+
+  }
+
+
+  // Apply motor speeds
+  analogWrite(ENB, abs(leftSpeed));
+  analogWrite(ENA, abs(rightSpeed));
+
+}
+
+
+// ==========================================
+// STOP MOTORS
+// ==========================================
+
+void stopMotors() {
+
+  analogWrite(ENA, 0);
+  analogWrite(ENB, 0);
+
+}
