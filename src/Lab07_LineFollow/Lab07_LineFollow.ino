@@ -77,8 +77,11 @@ const bool IR_ACTIVE_LOW = true;
 // 2. SENSOR GEOMETRY (measure your robot!)
 // =====================================
 
-// Sideways distance from the robot's centre line to the left/right sensors.
-const float SENSOR_SPACING_CM = 1.5;
+// Sideways distance from the centre sensor to the left/right sensors.
+// Recommended layout: centre sensor on the tape, L and R just outside its
+// edges -> spacing between TAPE_WIDTH/2 and TAPE_WIDTH (about 3-3.5 cm for
+// 4.8 cm tape). Any wider and the line can hide in a gap between sensors.
+const float SENSOR_SPACING_CM = 3.2;
 
 // Width of the tape on the course.
 const float TAPE_WIDTH_CM = 4.8;
@@ -272,13 +275,17 @@ void runStartStop() {
 //   L on,  R off     -> line is to the left  -> turn LEFT
 //   both off         -> lost: spin toward the side we last saw it
 //
-// Straddle layout (sensors just outside the tape edges):
-//   both off         -> centred, drive straight
+// Straddle layout (centre on tape, L and R just outside the edges; recommended):
+//   both off, C on   -> centred, drive straight
+//   all three off    -> lost: spin toward the side we last saw it
 //   L on / R on      -> turn toward the sensor that sees tape
 //   both on          -> junction: go straight
 
 void runPingPong() {
-  if (millis() - allOffSince > LOST_STOP_MS) { finish("line lost"); return; }
+  // In the straddle layout with no centre sensor, "all off" is the normal
+  // centred reading, so it can't mean the line is lost.
+  bool canDetectLost = SENSORS_INSIDE_TAPE || HAS_CENTER_SENSOR;
+  if (canDetectLost && millis() - allOffSince > LOST_STOP_MS) { finish("line lost"); return; }
 
   bool lineLeft = irL && !irR;
   bool lineRight = irR && !irL;
@@ -293,9 +300,12 @@ void runPingPong() {
     if (SENSORS_INSIDE_TAPE) driveSmooth(DRIFT_SLOW, DRIFT_FAST);  // drift left
     else                     driveSmooth(BASE_SPEED, BASE_SPEED);  // junction
   } else {
-    // both off
-    if (SENSORS_INSIDE_TAPE) pivotToward(lastSide == 0 ? +1 : lastSide);
-    else                     driveSmooth(BASE_SPEED, BASE_SPEED);
+    // L and R both off. Straddle layout: centred if the centre sensor sees
+    // tape (or if there is no centre sensor to ask). Otherwise the line has
+    // slipped out past a side sensor: spin toward where we last saw it.
+    bool centred = !SENSORS_INSIDE_TAPE && (!HAS_CENTER_SENSOR || irC);
+    if (centred) driveSmooth(BASE_SPEED, BASE_SPEED);
+    else         pivotToward(lastSide == 0 ? +1 : lastSide);
   }
 }
 
