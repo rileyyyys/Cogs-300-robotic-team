@@ -1,0 +1,147 @@
+// ==========================================
+// WALL FOLLOWING ROBOT
+// Arduino UNO R4 WiFi
+// L298N Motor Driver
+// Two Ultrasonic Sensors
+// ==========================================
+// -------- ULTRASONIC SENSORS --------
+// Left sensor
+const int leftTrig = 13;
+const int leftEcho = 12;
+// Front sensor
+const int frontTrig = 11;
+const int frontEcho = 10;
+// -------- MOTOR PINS --------
+// Left motor
+const int enA = 9;
+const int in1 = 8;
+const int in2 = 7;
+// Right motor
+const int enB = 3;
+const int in3 = 5;
+const int in4 = 4;
+// -------- WALL FOLLOWING SETTINGS --------
+const int targetDistance = 20;  // Desired wall distance (cm)
+const int baseSpeed = 120;
+const int maxSpeed = 200;
+const int minSpeed = 0;
+const int frontThreshold = 15;
+// Proportional controller
+float Kp = 3.0;
+// ==========================================
+// SETUP
+// ==========================================
+void setup() {
+  Serial.begin(9600);
+  // Ultrasonic sensors
+  pinMode(leftTrig, OUTPUT);
+  pinMode(leftEcho, INPUT);
+  pinMode(frontTrig, OUTPUT);
+  pinMode(frontEcho, INPUT);
+  // Motor pins
+  pinMode(enA, OUTPUT);
+  pinMode(in1, OUTPUT);
+  pinMode(in2, OUTPUT);
+  pinMode(enB, OUTPUT);
+  pinMode(in3, OUTPUT);
+  pinMode(in4, OUTPUT);
+  stopMotors();
+}
+// ==========================================
+// DISTANCE MEASUREMENT
+// ==========================================
+float getDistance(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+  long duration = pulseIn(echoPin, HIGH, 30000);
+  if (duration == 0) {
+    return -1;
+  }
+  float distance = duration * 0.0343 / 2;
+  return distance;
+}
+// ==========================================
+// MOTOR CONTROL
+// ==========================================
+void setMotors(int leftSpeed, int rightSpeed) {
+  // Left motor direction
+  if (leftSpeed >= 0) {
+    digitalWrite(in1, HIGH);
+    digitalWrite(in2, LOW);
+  } else {
+    digitalWrite(in1, LOW);
+    digitalWrite(in2, HIGH);
+  }
+  // Right motor direction
+  if (rightSpeed >= 0) {
+    digitalWrite(in3, HIGH);
+    digitalWrite(in4, LOW);
+  } else {
+    digitalWrite(in3, LOW);
+    digitalWrite(in4, HIGH);
+  }
+  analogWrite(enA, constrain(abs(leftSpeed), 0, 255));
+  analogWrite(enB, constrain(abs(rightSpeed), 0, 255));
+}
+void stopMotors() {
+  analogWrite(enA, 0);
+  analogWrite(enB, 0);
+}
+// ==========================================
+// TURN RIGHT
+// ==========================================
+void turnRight() {
+  stopMotors();
+  delay(200);
+  // Rotate right
+  setMotors(130, -130);
+  delay(450);  // Will need calibration
+  stopMotors();
+  delay(200);
+}
+// ==========================================
+// WALL FOLLOWING
+// ==========================================
+void loop() {
+  // Read sensors
+  float leftDistance = getDistance(leftTrig, leftEcho);
+  delay(30);
+  float frontDistance = getDistance(frontTrig, frontEcho);
+  // Print sensor measurements
+  Serial.print("Left: ");
+  Serial.print(leftDistance);
+  Serial.print(" cm | Front: ");
+  Serial.print(frontDistance);
+  Serial.println(" cm");
+  // ----------------------------------------
+  // CASE 1: FRONT OBSTACLE
+  // ----------------------------------------
+  if (frontDistance > 0 && frontDistance < frontThreshold) {
+    turnRight();
+    return;
+  }
+  // ----------------------------------------
+  // CASE 2: LEFT WALL NOT DETECTED
+  // ----------------------------------------
+  if (leftDistance < 0 || leftDistance > 80) {
+    // Search for the wall by steering left
+    setMotors(80, 140);
+    return;
+  }
+  // ----------------------------------------
+  // CASE 3: WALL FOLLOWING (P-CONTROLLER)
+  // ----------------------------------------
+  float error = leftDistance - targetDistance;
+  float correction = Kp * error;
+  int leftSpeed = baseSpeed - correction;
+  int rightSpeed = baseSpeed + correction;
+  // Limit motor speeds
+  leftSpeed = constrain(leftSpeed, minSpeed, maxSpeed);
+  rightSpeed = constrain(rightSpeed, minSpeed, maxSpeed);
+  // Apply motor speeds
+  setMotors(leftSpeed, rightSpeed);
+  delay(30);
+}

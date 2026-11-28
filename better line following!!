@@ -1,0 +1,559 @@
+
+/*
+  COGS 300 - LAB 7
+  SLOW THREE-SENSOR LINE FOLLOWER
+  Arduino UNO R4 WiFi
+
+  Follows WHITE tape.
+  Tuned for slower and more controlled movement.
+*/
+
+#include <Arduino.h>
+
+// =====================================
+// MOTOR PINS
+// =====================================
+
+// Right motor
+const int ENA = 9;
+const int IN1 = 8;
+const int IN2 = 7;
+
+// Left motor
+const int ENB = 3;
+const int IN3 = 5;
+const int IN4 = 4;
+
+// Motor orientation
+const bool REVERSE_LEFT = true;
+const bool REVERSE_RIGHT = false;
+
+// =====================================
+// IR SENSORS
+// =====================================
+
+const int IR_LEFT = A0;
+const int IR_CENTER = A1;
+const int IR_RIGHT = A2;
+
+// Confirmed sensor setting
+const bool IR_ACTIVE_LOW = true;
+
+// =====================================
+// SPEED SETTINGS
+// =====================================
+
+// Slower than previous code
+const int BASE_SPEED = 65;
+
+// Gentle steering
+const int TURN_SLOW = 30;
+const int TURN_FAST = 75;
+
+// Stronger steering
+const int SHARP_SLOW = 0;
+const int SHARP_FAST = 85;
+
+// Slow recovery when tape is lost
+const int SEARCH_SPEED = 65;
+
+// Compensation for weaker left motor
+const int LEFT_MOTOR_BOOST = 35;
+
+// Smooth acceleration
+const int ACCEL_STEP = 8;
+
+// How often to update steering
+const int LOOP_DELAY = 10;
+
+const int RECOVERY_SPEED = 40;
+const unsigned long RECOVERY_DURATION = 200; // milliseconds
+
+// =====================================
+// ROBOT STATE
+// =====================================
+
+bool irL = false;
+bool irC = false;
+bool irR = false;
+
+// -1 = tape last detected left
+//  1 = tape last detected right
+int lastSide = 0;
+
+int leftMotorSpeed = 0;
+int rightMotorSpeed = 0;
+
+unsigned long lostSince = 0;
+
+// Sharp turn tracking:
+//  0 = Not turning
+//  1 = Sharp right turn
+// -1 = Sharp left turn
+
+int sharpTurnState = 0;
+int centerConfirmCount = 0;
+const int CENTER_CONFIRM_REQUIRED = 2;
+unsigned long recoveryStart = 0;
+bool recovering = false;
+
+// =====================================
+// BAYESIAN FILTER
+// =====================================
+
+// Probabilities:
+// [0] = Tape LEFT
+// [1] = Tape CENTER
+// [2] = Tape RIGHT
+
+float belief[3] = {0.15, 0.70, 0.15};
+
+// Probability that the tape stays in
+// approximately the same position.
+const float STAY_PROB = 0.85;
+
+// =====================================
+// SENSOR READING
+// =====================================
+
+bool readIR(int pin) {
+  int value = digitalRead(pin);
+
+  if (IR_ACTIVE_LOW) {
+    return value == LOW;
+  }
+
+  return value == HIGH;
+}
+
+void updateIR() {
+  irL = readIR(IR_LEFT);
+  irC = readIR(IR_CENTER);
+  irR = readIR(IR_RIGHT);
+}
+
+// =====================================
+// MOTOR OUTPUT
+// =====================================
+
+void motorOutput(
+  int speedValue,
+  int enablePin,
+  int pin1,
+  int pin2,
+  bool reverse
+) {
+
+  speedValue = constrain(speedValue, -255, 255);
+
+  if (reverse) {
+    speedValue = -speedValue;
+  }
+
+  if (speedValue > 0) {
+    digitalWrite(pin1, HIGH);
+    digitalWrite(pin2, LOW);
+    analogWrite(enablePin, speedValue);
+  }
+
+  else if (speedValue < 0) {
+    digitalWrite(pin1, LOW);
+    digitalWrite(pin2, HIGH);
+    analogWrite(enablePin, -speedValue);
+  }
+
+  else {
+    analogWrite(enablePin, 0);
+    digitalWrite(pin1, LOW);
+    digitalWrite(pin2, LOW);
+  }
+}
+
+// =====================================
+// SMOOTH SPEED CONTROL
+// =====================================
+
+int approachSpeed(int current, int target) {
+
+  if (current < target) {
+    return min(current + ACCEL_STEP, target);
+  }
+
+  if (current > target) {
+    return max(current - ACCEL_STEP, target);
+  }
+
+  return target;
+}
+
+void driveSmooth(int leftTarget, int rightTarget) {
+
+  // Boost weaker left motor
+  if (leftTarget > 0) {
+    leftTarget += LEFT_MOTOR_BOOST;
+  }
+
+  leftTarget = constrain(leftTarget, -255, 255);
+  rightTarget = constrain(rightTarget, -255, 255);
+
+  leftMotorSpeed =
+    approachSpeed(leftMotorSpeed, leftTarget);
+
+  rightMotorSpeed =
+    approachSpeed(rightMotorSpeed, rightTarget);
+
+  motorOutput(
+    leftMotorSpeed,
+    ENB,
+    IN3,
+    IN4,
+    REVERSE_LEFT
+  );
+
+  motorOutput(
+    rightMotorSpeed,
+    ENA,
+    IN1,
+    IN2,
+    REVERSE_RIGHT
+  );
+}
+
+void stopNow() {
+
+  leftMotorSpeed = 0;
+  rightMotorSpeed = 0;
+
+  motorOutput(0, ENB, IN3, IN4, REVERSE_LEFT);
+  motorOutput(0, ENA, IN1, IN2, REVERSE_RIGHT);
+}
+
+// =====================================
+// BAYESIAN FILTER FUNCTIONS
+// =====================================
+
+void updateBayes() {
+
+  float predicted[3];
+
+  // STEP 1: Predict the next position
+  // using the previous probabilities.
+
+  predicted[0] =
+    belief[0] * STAY_PROB +
+    belief[1] * ((1.0 - STAY_PROB) / 2.0);
+
+  predicted[1] =
+    belief[1] * STAY_PROB +
+    belief[0] * ((1.0 - STAY_PROB) / 2.0) +
+    belief[2] * ((1.0 - STAY_PROB) / 2.0);
+
+  predicted[2] =
+    belief[2] * STAY_PROB +
+    belief[1] * ((1.0 - STAY_PROB) / 2.0);
+
+  // STEP 2: Calculate sensor likelihoods.
+
+  float likelihood[3];
+
+  // LEFT + CENTER
+  if (irL && irC && !irR) {
+    likelihood[0] = 0.80;
+    likelihood[1] = 0.18;
+    likelihood[2] = 0.02;
+  }
+
+  // CENTER ONLY
+  else if (!irL && irC && !irR) {
+    likelihood[0] = 0.08;
+    likelihood[1] = 0.84;
+    likelihood[2] = 0.08;
+  }
+
+  // CENTER + RIGHT
+  else if (!irL && irC && irR) {
+    likelihood[0] = 0.02;
+    likelihood[1] = 0.18;
+    likelihood[2] = 0.80;
+  }
+
+  // LEFT ONLY
+  else if (irL && !irC && !irR) {
+    likelihood[0] = 0.92;
+    likelihood[1] = 0.07;
+    likelihood[2] = 0.01;
+  }
+
+  // RIGHT ONLY
+  else if (!irL && !irC && irR) {
+    likelihood[0] = 0.01;
+    likelihood[1] = 0.07;
+    likelihood[2] = 0.92;
+  }
+
+  // ALL THREE
+  else if (irL && irC && irR) {
+    likelihood[0] = 0.15;
+    likelihood[1] = 0.70;
+    likelihood[2] = 0.15;
+  }
+
+  // LEFT + RIGHT
+  else {
+    likelihood[0] = 0.35;
+    likelihood[1] = 0.30;
+    likelihood[2] = 0.35;
+  }
+
+  // STEP 3: Apply Bayes' rule.
+
+  float total = 0;
+
+  for (int i = 0; i < 3; i++) {
+    belief[i] = predicted[i] * likelihood[i];
+    total += belief[i];
+  }
+
+  // STEP 4: Normalize probabilities.
+
+  if (total > 0) {
+    for (int i = 0; i < 3; i++) {
+      belief[i] /= total;
+    }
+  }
+}
+
+// =====================================
+// LINE FOLLOWING ALGORITHM
+// =====================================
+
+void followLine() {
+
+  bool seesTape = irL || irC || irR;
+
+  // =====================================
+  // DETECT NEW SHARP TURNS
+  // =====================================
+
+  // Sharp RIGHT: right sensor only
+  if (sharpTurnState == 0 &&
+      !irL && !irC && irR) {
+
+    sharpTurnState = 1;
+    lastSide = 1;
+  }
+
+  // Sharp LEFT: left sensor only
+  else if (sharpTurnState == 0 &&
+           irL && !irC && !irR) {
+
+    sharpTurnState = -1;
+    lastSide = -1;
+  }
+
+  // =====================================
+  // SHARP TURN MODE
+  // =====================================
+
+ if (sharpTurnState != 0) {
+
+  // Check whether center sensor detects tape
+
+  if (irC) {
+    centerConfirmCount++;
+  }
+
+  else {
+    centerConfirmCount = 0;
+  }
+
+  // Require 3 consecutive detections
+
+if (centerConfirmCount >= CENTER_CONFIRM_REQUIRED) {
+  sharpTurnState = 0;
+  centerConfirmCount = 0;
+
+  recovering = true;
+  recoveryStart = millis();
+}
+
+  else {
+
+    // Continue sharp RIGHT turn
+
+    if (sharpTurnState == 1) {
+      driveSmooth(SHARP_FAST, SHARP_SLOW);
+    }
+
+    // Continue sharp LEFT turn
+
+    else if (sharpTurnState == -1) {
+      driveSmooth(SHARP_SLOW, SHARP_FAST);
+    }
+
+    return;
+  }
+}
+
+// Recovery period after a sharp turn
+if (recovering) {
+  if (millis() - recoveryStart < RECOVERY_DURATION) {
+    driveSmooth(RECOVERY_SPEED, RECOVERY_SPEED);
+    return;
+  } else {
+    recovering = false;
+  }
+}
+
+  // =====================================
+  // NO TAPE DETECTED
+  // =====================================
+
+  if (!seesTape) {
+
+    if (lostSince == 0) {
+      lostSince = millis();
+    }
+
+    // Briefly continue moving slowly
+    if (millis() - lostSince < 60) {
+
+      driveSmooth(40, 40);
+    }
+
+    // Search LEFT
+    else if (lastSide == -1) {
+
+      driveSmooth(-SEARCH_SPEED, SEARCH_SPEED);
+    }
+
+    // Search RIGHT
+    else if (lastSide == 1) {
+
+      driveSmooth(SEARCH_SPEED, -SEARCH_SPEED);
+    }
+
+    else {
+
+      driveSmooth(0, 0);
+    }
+
+    return;
+  }
+
+  lostSince = 0;
+
+  // =====================================
+  // BAYESIAN FILTER
+  // =====================================
+
+  updateBayes();
+
+  // Remember the estimated tape direction
+
+  if (belief[0] > belief[2]) {
+
+    lastSide = -1;
+  }
+
+  else if (belief[2] > belief[0]) {
+
+    lastSide = 1;
+  }
+
+  // =====================================
+  // CALCULATE MOTOR SPEEDS
+  // =====================================
+
+  float leftSpeed =
+    belief[0] * TURN_SLOW +
+    belief[1] * BASE_SPEED +
+    belief[2] * TURN_FAST;
+
+  float rightSpeed =
+    belief[0] * TURN_FAST +
+    belief[1] * BASE_SPEED +
+    belief[2] * TURN_SLOW;
+
+  driveSmooth(
+    round(leftSpeed),
+    round(rightSpeed)
+  );
+}
+
+// =====================================
+// DEBUG OUTPUT
+// =====================================
+
+void printDebug() {
+
+  static unsigned long lastPrint = 0;
+
+  if (millis() - lastPrint < 150) {
+    return;
+  }
+
+  lastPrint = millis();
+
+  Serial.print("L:");
+  Serial.print(irL);
+
+  Serial.print(" C:");
+  Serial.print(irC);
+
+  Serial.print(" R:");
+  Serial.print(irR);
+
+  Serial.print(" | LM:");
+  Serial.print(leftMotorSpeed);
+
+  Serial.print(" RM:");
+  Serial.print(rightMotorSpeed);
+
+  Serial.print(" | Side:");
+  Serial.println(lastSide);
+}
+
+// =====================================
+// SETUP
+// =====================================
+
+void setup() {
+
+  Serial.begin(115200);
+
+  pinMode(ENA, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+
+  pinMode(ENB, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  pinMode(IR_LEFT, INPUT);
+  pinMode(IR_CENTER, INPUT);
+  pinMode(IR_RIGHT, INPUT);
+
+  stopNow();
+
+  Serial.println("COGS 300 LAB 7");
+  Serial.println("SLOW LINE FOLLOWER");
+  Serial.println("Starting in 3 seconds");
+
+  delay(3000);
+}
+
+// =====================================
+// MAIN LOOP
+// =====================================
+
+void loop() {
+
+  updateIR();
+
+  followLine();
+
+  printDebug();
+
+  delay(LOOP_DELAY);
+}
